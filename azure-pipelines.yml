@@ -1,0 +1,74 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  - main
+
+pool:
+  name: 'ManagedNodePool'  # Use AKS Managed Node Pool
+
+variables:
+  DOCKER_IMAGE: 'nginx:latest'  # Change this to the image you want to scan
+  AWS_REGION: 'us-east-1'        # AWS region for ECR
+  AWS_ACCOUNT_ID: '123456789012'  # Replace with your AWS account ID
+  ECR_REPOSITORY: 'your-ecr-repo' # Replace with your AWS ECR repository name
+  SCANNED_IMAGE_TAG: 'scanned-latest'
+
+stages:
+  - stage: Pull_and_Scan
+    displayName: 'Pull Image and Scan with Trivy'
+    jobs:
+      - job: PullAndScan
+        displayName: 'Pull and Scan Image'
+        steps:
+          - script: |
+              echo "Pulling Docker Image: $(DOCKER_IMAGE)"
+              docker pull $(DOCKER_IMAGE)
+            displayName: 'Pull Image from Docker Hub'
+
+          - script: |
+              echo "Installing Trivy..."
+              wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.45.0_Linux-64bit.deb
+              sudo dpkg -i trivy_0.45.0_Linux-64bit.deb
+            displayName: 'Install Trivy Scanner'
+
+          - script: |
+              echo "Running Trivy Scan on Image: $(DOCKER_IMAGE)"
+              trivy image --exit-code 0 --format json -o trivy-report.json $(DOCKER_IMAGE)
+            displayName: 'Scan Image with Trivy'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Trivy Scan Report'
+            inputs:
+              pathToPublish: 'trivy-report.json'
+              artifactName: 'SecurityReports'
+
+  - stage: Push_to_ECR
+    displayName: 'Push Image to AWS ECR'
+    dependsOn: Pull_and_Scan
+    condition: succeeded()
+    jobs:
+      - job: PushToECR
+        displayName: 'Push Scanned Image to AWS ECR'
+        steps:
+          - script: |
+              echo "Installing AWS CLI..."
+              sudo apt-get update && sudo apt-get install -y awscli
+            displayName: 'Install AWS CLI'
+
+          - script: |
+              echo "Authenticating with AWS ECR..."
+              aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+            displayName: 'Login to AWS ECR'
+
+          - script: |
+              echo "Tagging Image for ECR..."
+              docker tag $(DOCKER_IMAGE) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPOSITORY):$(SCANNED_IMAGE_TAG)
+            displayName: 'Tag Image for ECR'
+
+          - script: |
+              echo "Pushing Image to ECR..."
+              docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPOSITORY):$(SCANNED_IMAGE_TAG)
+            displayName: 'Push Image to AWS ECR'
